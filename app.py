@@ -52,7 +52,6 @@ async def expand_link(link: str) -> str:
         parsed = urlparse(final_url)
         qs = parse_qs(parsed.query)
         if 'redirectUrl' in qs:
-            # redirectUrl is percent-encoded
             redirect = unquote(qs['redirectUrl'][0])
             return redirect
         return final_url
@@ -106,32 +105,36 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             title, img_url = await scrape_info(final)
             description = await generate_description(final)
+
+            # Cancella il messaggio originale
             try:
                 await update.message.delete()
             except:
                 pass
-                        user_name = update.effective_user.first_name
-            # Customize message
+
+            # Nome utente
+            user_name = update.effective_user.first_name
+
+            # Personalizza il messaggio
             caption = (
-                f"Grazie per aver condiviso questo fantastico prodotto, {user_name}! 
-
-"
-                f"{description}
-
-"
-                f"Utilizza il link sottostante per far guadagnare una commissione a Nellino:
-{affiliate_link}"
+                f"Grazie per aver condiviso questo fantastico prodotto, {user_name}!\n\n"
+                f"{description}\n\n"
+                f"Utilizza il link sottostante per far guadagnare una commissione a Nellino:\n{affiliate_link}"
             )
+
+            # Invia foto o testo
             if img_url:
                 await context.bot.send_photo(
                     chat_id=update.effective_chat.id,
                     photo=img_url,
-                    caption=caption
+                    caption=caption,
+                    parse_mode="Markdown"
                 )
             else:
                 await context.bot.send_message(
                     chat_id=update.effective_chat.id,
-                    text=caption
+                    text=caption,
+                    parse_mode="Markdown"
                 )
             return
 
