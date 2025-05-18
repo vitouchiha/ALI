@@ -110,19 +110,28 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await update.message.delete()
             except:
                 pass
-            caption = f"🤑 *{title}*\n{description}\n\n🔗 {affiliate_link}"
+                        user_name = update.effective_user.first_name
+            # Customize message
+            caption = (
+                f"Grazie per aver condiviso questo fantastico prodotto, {user_name}! 
+
+"
+                f"{description}
+
+"
+                f"Utilizza il link sottostante per far guadagnare una commissione a Nellino:
+{affiliate_link}"
+            )
             if img_url:
                 await context.bot.send_photo(
                     chat_id=update.effective_chat.id,
                     photo=img_url,
-                    caption=caption,
-                    parse_mode="Markdown"
+                    caption=caption
                 )
             else:
                 await context.bot.send_message(
                     chat_id=update.effective_chat.id,
-                    text=caption,
-                    parse_mode="Markdown"
+                    text=caption
                 )
             return
 
