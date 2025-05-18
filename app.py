@@ -27,7 +27,7 @@ if not TOKEN or not OPENAI_API_KEY or not HOST:
     raise RuntimeError("Env vars mancanti")
 
 # Setup OpenAI
-openai.api_key = OPENAI_API_KEY
+ope = openai.api_key = OPENAI_API_KEY
 
 # Initialize Telegram Application
 application = ApplicationBuilder().token(TOKEN).build()
@@ -38,8 +38,8 @@ app = FastAPI()
 
 # Utilities
 def extract_id(url: str) -> str | None:
-    m = re.search(r"/item/(\d+)\.html", url)
-    return m.group(1) if m else None
+    match = re.search(r"/item/(\d+)\.html", url)
+    return match.group(1) if match else None
 
 async def expand_link(link: str) -> str:
     headers = {"User-Agent": "Mozilla/5.0 (compatible; Bot/1.0)"}
@@ -47,13 +47,12 @@ async def expand_link(link: str) -> str:
         async with httpx.AsyncClient(follow_redirects=True, headers=headers, timeout=10) as client:
             resp = await client.get(link)
             final_url = str(resp.url)
-        # Handle AliExpress share redirectUrl parameter
+        # Handle AliExpress share redirectUrl
         from urllib.parse import urlparse, parse_qs, unquote
         parsed = urlparse(final_url)
         qs = parse_qs(parsed.query)
         if 'redirectUrl' in qs:
-            redirect = unquote(qs['redirectUrl'][0])
-            return redirect
+            return unquote(qs['redirectUrl'][0])
         return final_url
     except Exception as e:
         logger.warning(f"Errore espansione link {link}: {e}")
@@ -115,7 +114,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # Nome utente
             user_name = update.effective_user.first_name
 
-            # Personalizza il messaggio
+            # Componi caption
             caption = (
                 f"Grazie per aver condiviso questo fantastico prodotto, {user_name}!\n\n"
                 f"{description}\n\n"
