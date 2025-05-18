@@ -22,7 +22,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Verifica env
-aif not TOKEN or not OPENAI_API_KEY or not HOST:
+if not TOKEN or not OPENAI_API_KEY or not HOST:
     logger.error("Devi impostare TELEGRAM_BOT_TOKEN, OPENAI_API_KEY e RENDER_EXTERNAL_HOSTNAME")
     raise RuntimeError("Env vars mancanti")
 
