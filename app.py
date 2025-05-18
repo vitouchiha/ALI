@@ -21,89 +21,112 @@ PORT = int(os.getenv("PORT", 8000))
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Verifica env
+# Verify environment
 if not TOKEN or not OPENAI_API_KEY or not HOST:
-    logger.error("Devi impostare TELEGRAM_BOT_TOKEN, OPENAI_API_KEY e RENDER_EXTERNAL_HOSTNAME")
+    logger.error("Devono essere impostate: TELEGRAM_BOT_TOKEN, OPENAI_API_KEY e RENDER_EXTERNAL_HOSTNAME")
     raise RuntimeError("Env vars mancanti")
 
 # Setup OpenAI
 openai.api_key = OPENAI_API_KEY
 
-# Telegram Application
+# Initialize Telegram Application
 application = ApplicationBuilder().token(TOKEN).build()
 bot = application.bot
 
 # FastAPI app
 app = FastAPI()
 
-# Utils
+# Utilities
 def extract_id(url: str) -> str | None:
     m = re.search(r"/item/(\d+)\.html", url)
     return m.group(1) if m else None
 
-def make_affiliate(pid: str) -> str:
-    return (
-        f"https://it.aliexpress.com/item/{pid}.html"
-        f"?aff_fcid={AFFILIATE_ID}&aff_fsk={AFFILIATE_ID}"
-        f"&aff_platform=default&sk={AFFILIATE_ID}"
-    )
-
 async def expand_link(link: str) -> str:
+    headers = {"User-Agent": "Mozilla/5.0 (compatible; Bot/1.0)"}
     try:
-        async with httpx.AsyncClient(follow_redirects=True) as client:
+        async with httpx.AsyncClient(follow_redirects=True, headers=headers, timeout=10) as client:
             resp = await client.get(link)
             return str(resp.url)
-    except Exception:
+    except Exception as e:
+        logger.warning(f"Errore espansione link {link}: {e}")
         return link
 
-async def scrape_info(link: str):
+async def scrape_info(link: str) -> tuple[str, str | None]:
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
     try:
-        async with httpx.AsyncClient() as client:
-            r = await client.get(link)
-        soup = BeautifulSoup(r.text, "html.parser")
-        title = soup.find("meta", property="og:title")
-        img = soup.find("meta", property="og:image")
-        return (
-            title["content"] if title else "",
-            img["content"] if img else None
-        )
-    except Exception:
-        return "", None
+        async with httpx.AsyncClient(headers=headers, timeout=10) as client:
+            resp = await client.get(link)
+        soup = BeautifulSoup(resp.text, "html.parser")
+        og_title = soup.find("meta", property="og:title")
+        og_image = soup.find("meta", property="og:image")
+        title = og_title["content"].strip() if og_title and og_title.get("content") else "Prodotto AliExpress"
+        img_url = og_image["content"] if og_image and og_image.get("content") else None
+        return title, img_url
+    except Exception as e:
+        logger.warning(f"Errore scraping info per {link}: {e}")
+        return "Prodotto AliExpress", None
 
-# Handler
+async def generate_description(link: str) -> str:
+    try:
+        prompt = f"Genera una breve descrizione entusiasmante per questo prodotto AliExpress: {link}"
+        resp = await openai.ChatCompletion.acreate(
+            model="gpt-3.5-turbo",
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=80,
+            temperature=0.7
+        )
+        return resp.choices[0].message.content.strip()
+    except Exception as e:
+        logger.warning(f"OpenAI error: {e}")
+        return "Sembra un prodotto fantastico!"
+
+# Handler registration
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text or ""
-    matches = re.findall(r"https?://\S+", text)
-    for link in matches:
-        if any(domain in link for domain in ("aliexpress.com", "s.click.aliexpress.com", "a.aliexpress.com")):
+    links = re.findall(r"https?://\S+", text)
+    for link in links:
+        if any(d in link for d in ("aliexpress.com", "s.click.aliexpress.com", "a.aliexpress.com")):
             final = await expand_link(link)
-            pid = extract_id(final)
-            if not pid:
+            product_id = extract_id(final)
+            if not product_id:
                 continue
-            aff = make_affiliate(pid)
-            desc, img = await scrape_info(final)
-            # delete original
+            affiliate_link = (
+                f"https://it.aliexpress.com/item/{product_id}.html"
+                f"?aff_fcid={AFFILIATE_ID}&aff_fsk={AFFILIATE_ID}"
+                f"&aff_platform=default&sk={AFFILIATE_ID}"
+            )
+            title, img_url = await scrape_info(final)
+            description = await generate_description(final)
             try:
                 await update.message.delete()
             except:
                 pass
-            cap = f"🤑 {desc}\n\n🔗 {aff}"
-            if img:
-                await context.bot.send_photo(chat_id=update.effective_chat.id, photo=img, caption=cap)
+            caption = f"🤑 *{title}*\n{description}\n\n🔗 {affiliate_link}"
+            if img_url:
+                await context.bot.send_photo(
+                    chat_id=update.effective_chat.id,
+                    photo=img_url,
+                    caption=caption,
+                    parse_mode="Markdown"
+                )
             else:
-                await context.bot.send_message(chat_id=update.effective_chat.id, text=cap)
+                await context.bot.send_message(
+                    chat_id=update.effective_chat.id,
+                    text=caption,
+                    parse_mode="Markdown"
+                )
             return
 
 application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-# Webhook route
+# Webhook setup
 @app.on_event("startup")
-async def startup():
+async def on_startup():
     await application.initialize()
     await application.start()
-    url = f"https://{HOST}/webhook/{TOKEN}"
-    await bot.set_webhook(url)
-    logger.info(f"Webhook set to {url}")
+    webhook_url = f"https://{HOST}/webhook/{TOKEN}"
+    await bot.set_webhook(webhook_url)
+    logger.info(f"Webhook impostato su {webhook_url}")
 
 @app.post("/webhook/{token}")
 async def process_webhook(token: str, req: Request):
@@ -115,7 +138,7 @@ async def process_webhook(token: str, req: Request):
     return {"ok": True}
 
 @app.on_event("shutdown")
-async def shutdown():
+async def on_shutdown():
     await application.stop()
 
 # Run ASGI server
