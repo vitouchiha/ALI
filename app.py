@@ -46,7 +46,16 @@ async def expand_link(link: str) -> str:
     try:
         async with httpx.AsyncClient(follow_redirects=True, headers=headers, timeout=10) as client:
             resp = await client.get(link)
-            return str(resp.url)
+            final_url = str(resp.url)
+        # Handle AliExpress share redirectUrl parameter
+        from urllib.parse import urlparse, parse_qs, unquote
+        parsed = urlparse(final_url)
+        qs = parse_qs(parsed.query)
+        if 'redirectUrl' in qs:
+            # redirectUrl is percent-encoded
+            redirect = unquote(qs['redirectUrl'][0])
+            return redirect
+        return final_url
     except Exception as e:
         logger.warning(f"Errore espansione link {link}: {e}")
         return link
