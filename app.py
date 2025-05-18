@@ -1,136 +1,98 @@
 import os
-import re
-import logging
-from fastapi import FastAPI, Request
-from telegram import Update, Bot
-from telegram.ext import (
-    ApplicationBuilder, MessageHandler, ContextTypes, filters
-)
-import httpx
-import openai
-from bs4 import BeautifulSoup
+import requests
+from flask import Flask, request
+from urllib.parse import urlparse, parse_qs
+import telegram
+from telegram import InputMediaPhoto
 
-# Logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+# Config
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
+AFFILIATE_ID = os.environ.get("AFFILIATE_ID")  # esempio: _EHN0NeQ
+BASE_AFFILIATE_URL = "https://s.click.aliexpress.com/deep_link.htm?aff_short_key={}&dp={}"
 
-# Env vars
-TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-HOST = os.getenv("RENDER_EXTERNAL_HOSTNAME")
-AFFILIATE_ID = "_EHN0NeQ"
+bot = telegram.Bot(token=BOT_TOKEN)
+app = Flask(__name__)
 
-if not TOKEN or not OPENAI_API_KEY or not HOST:
-    logger.error("ENV VARS mancanti (TOKEN, OPENAI_API_KEY, HOST)")
-    raise RuntimeError("Missing env vars")
+def expand_url(short_url):
+    try:
+        response = requests.head(short_url, allow_redirects=True, timeout=5)
+        return response.url
+    except Exception as e:
+        print(f"[ERRORE] Impossibile espandere URL: {e}")
+        return short_url
 
-# Setup
-openai.api_key = OPENAI_API_KEY
-bot = Bot(token=TOKEN)
-app = FastAPI()
-application = ApplicationBuilder().token(TOKEN).build()
+def extract_product_data(url):
+    try:
+        headers = {
+            "User-Agent": "Mozilla/5.0"
+        }
+        response = requests.get(url, headers=headers, timeout=10)
+        if not response.ok:
+            raise Exception("Errore nel caricamento della pagina prodotto")
 
-# === FUNZIONI ===
+        html = response.text
 
-def extract_id(url: str) -> str | None:
-    match = re.search(r"/item/(\d+)\.html", url)
-    return match.group(1) if match else None
+        # Estrazione rozza del titolo
+        start_title = html.find("<title>")
+        end_title = html.find("</title>")
+        title = html[start_title + 7:end_title].strip() if start_title != -1 and end_title != -1 else "Titolo non trovato"
 
-def make_affiliate(pid: str) -> str:
-    return (
-        f"https://it.aliexpress.com/item/{pid}.html"
-        f"?aff_fcid={AFFILIATE_ID}&aff_fsk={AFFILIATE_ID}"
-        f"&aff_platform=default&sk={AFFILIATE_ID}"
-    )
+        # Estrazione rozza dell'immagine
+        img_start = html.find('https://ae01.alicdn.com')
+        img_end = html.find('.jpg', img_start)
+        image_url = html[img_start:img_end + 4] if img_start != -1 and img_end != -1 else None
 
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text or ""
-    links = re.findall(r"https?://\S+", text)
+        return title, image_url
+    except Exception as e:
+        print(f"[ERRORE] Estrazione prodotto fallita: {e}")
+        return "Errore nel recupero dati prodotto", None
 
-    for link in links:
-        if "aliexpress.com" in link or "s.click.aliexpress.com" in link or "a.aliexpress.com" in link:
+def generate_affiliate_link(original_url):
+    deep_link = requests.utils.quote(original_url, safe="")
+    return BASE_AFFILIATE_URL.format(AFFILIATE_ID, deep_link)
+
+@app.route(f"/{BOT_TOKEN}", methods=["POST"])
+def webhook():
+    update = telegram.Update.de_json(request.get_json(force=True), bot)
+    if update.message and update.message.text:
+        msg = update.message
+        chat_id = msg.chat_id
+        message_id = msg.message_id
+        text = msg.text.strip()
+
+        # Cerca link AliExpress
+        if "aliexpress.com" in text or "s.click.aliexpress" in text or "a.aliexpress" in text:
+            # Espandi se necessario
+            expanded_url = expand_url(text)
+
+            # Estrai dati prodotto
+            title, image_url = extract_product_data(expanded_url)
+
+            # Genera link affiliato
+            aff_link = generate_affiliate_link(expanded_url)
+
+            # Costruisci didascalia
+            caption = f"{title}\n\n🔗 [Compra con il mio link affiliato]({aff_link})"
+
+            # Elimina messaggio originale
             try:
-                # Expand short link
-                async with httpx.AsyncClient(follow_redirects=True) as client:
-                    r = await client.get(link)
-                    link = str(r.url)
-            except:
-                pass
+                bot.delete_message(chat_id=chat_id, message_id=message_id)
+            except Exception as e:
+                print(f"[ERRORE] Non riesco a cancellare il messaggio: {e}")
 
-            pid = extract_id(link)
-            if not pid:
-                continue
-
-            aff = make_affiliate(pid)
-
-            # Get description from OpenAI
+            # Invia messaggio modificato
             try:
-                resp = openai.ChatCompletion.create(
-                    model="gpt-3.5-turbo",
-                    messages=[{
-                        "role": "user",
-                        "content": f"Scrivi una descrizione breve e accattivante per questo prodotto AliExpress: {link}"
-                    }],
-                    max_tokens=100
-                )
-                desc = resp.choices[0].message.content.strip()
-            except:
-                desc = "Ecco un ottimo prodotto che potrebbe interessarti!"
+                if image_url:
+                    bot.send_photo(chat_id=chat_id, photo=image_url, caption=caption, parse_mode="Markdown")
+                else:
+                    bot.send_message(chat_id=chat_id, text=caption, parse_mode="Markdown")
+            except Exception as e:
+                print(f"[ERRORE] Invio messaggio fallito: {e}")
+    return "OK"
 
-            # Get product image
-            img_url = None
-            try:
-                async with httpx.AsyncClient() as client:
-                    page = await client.get(link)
-                    soup = BeautifulSoup(page.text, "html.parser")
-                    meta = soup.find("meta", property="og:image")
-                    if meta:
-                        img_url = meta.get("content")
-            except:
-                pass
+@app.route("/", methods=["GET"])
+def home():
+    return "Bot AliExpress affiliato attivo e funzionante. Vai tranquillo Vito, tutto sotto controllo."
 
-            # Delete original message
-            try:
-                await update.message.delete()
-            except:
-                pass
-
-            caption = f"{desc}\n\n🔗 {aff}"
-            if img_url:
-                await context.bot.send_photo(
-                    chat_id=update.effective_chat.id,
-                    photo=img_url,
-                    caption=caption
-                )
-            else:
-                await context.bot.send_message(
-                    chat_id=update.effective_chat.id,
-                    text=caption
-                )
-            return
-
-# === HANDLER ===
-application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-
-# === FASTAPI WEBHOOK ===
-
-@app.on_event("startup")
-async def startup():
-    webhook = f"https://{HOST}/bot/{TOKEN}"
-    await bot.delete_webhook(drop_pending_updates=True)
-    await bot.set_webhook(webhook)
-    logger.info(f"Webhook impostato su {webhook}")
-
-@app.post("/bot/{token}")
-async def process_update(token: str, request: Request):
-    if token != TOKEN:
-        return {"error": "invalid token"}
-    data = await request.json()
-    update = Update.de_json(data, bot)
-    await application.process_update(update)
-    return {"ok": True}
-
-# === LOCAL DEV ===
 if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run("app:app", host="0.0.0.0", port=int(os.getenv("PORT", 8000)))
+    app.run(host="0.0.0.0", port=5000)
