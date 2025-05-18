@@ -1,122 +1,123 @@
 import os
 import re
 import logging
+import asyncio
 import httpx
 from bs4 import BeautifulSoup
-from telegram import Update, InputMediaPhoto, InputMediaVideo
-from telegram.ext import ApplicationBuilder, MessageHandler, ContextTypes, filters
 from fastapi import FastAPI, Request
-from telegram.ext import Application
-import asyncio
+from telegram import Update, Bot
+from telegram.ext import ApplicationBuilder, MessageHandler, ContextTypes, filters
+import uvicorn
+import openai
 
 # Config
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-AFFILIATE_ID = "_EHN0NeQ"
-PORT = int(os.environ.get("PORT", 8080))
-RENDER_EXTERNAL_HOSTNAME = os.getenv("RENDER_EXTERNAL_HOSTNAME")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+AFFILIATE_ID = os.getenv("AFFILIATE_ID", "_EHN0NeQ")
+HOST = os.getenv("RENDER_EXTERNAL_HOSTNAME")
+PORT = int(os.getenv("PORT", 8000))
 
 # Logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# FastAPI app
-web_app = FastAPI()
-telegram_app: Application = None
+# Verifica env
+aif not TOKEN or not OPENAI_API_KEY or not HOST:
+    logger.error("Devi impostare TELEGRAM_BOT_TOKEN, OPENAI_API_KEY e RENDER_EXTERNAL_HOSTNAME")
+    raise RuntimeError("Env vars mancanti")
 
-async def expand_aliexpress_link(short_url):
+# Setup OpenAI
+openai.api_key = OPENAI_API_KEY
+
+# Telegram Application
+application = ApplicationBuilder().token(TOKEN).build()
+bot = application.bot
+
+# FastAPI app
+app = FastAPI()
+
+# Utils
+def extract_id(url: str) -> str | None:
+    m = re.search(r"/item/(\d+)\.html", url)
+    return m.group(1) if m else None
+
+def make_affiliate(pid: str) -> str:
+    return (
+        f"https://it.aliexpress.com/item/{pid}.html"
+        f"?aff_fcid={AFFILIATE_ID}&aff_fsk={AFFILIATE_ID}"
+        f"&aff_platform=default&sk={AFFILIATE_ID}"
+    )
+
+async def expand_link(link: str) -> str:
     try:
         async with httpx.AsyncClient(follow_redirects=True) as client:
-            resp = await client.get(short_url)
+            resp = await client.get(link)
             return str(resp.url)
-    except Exception as e:
-        logger.warning(f"Errore nell'espansione del link: {e}")
-        return short_url
+    except Exception:
+        return link
 
-async def extract_info(url):
+async def scrape_info(link: str):
     try:
         async with httpx.AsyncClient() as client:
-            resp = await client.get(url)
-        soup = BeautifulSoup(resp.text, 'html.parser')
+            r = await client.get(link)
+        soup = BeautifulSoup(r.text, "html.parser")
+        title = soup.find("meta", property="og:title")
+        img = soup.find("meta", property="og:image")
+        return (
+            title["content"] if title else "",
+            img["content"] if img else None
+        )
+    except Exception:
+        return "", None
 
-        # Estrai immagine
-        image_tag = soup.find('meta', property='og:image')
-        image_url = image_tag['content'] if image_tag else None
-
-        # Estrai video (se presente)
-        video_tag = soup.find('meta', property='og:video')
-        video_url = video_tag['content'] if video_tag else None
-
-        # Estrai descrizione
-        desc_tag = soup.find('meta', property='og:title')
-        description = desc_tag['content'] if desc_tag else "Nessuna descrizione trovata"
-
-        return image_url, video_url, description
-
-    except Exception as e:
-        logger.warning(f"Errore nel parsing: {e}")
-        return None, None, "Nessuna descrizione trovata"
-
-def convert_link(link):
-    if "aliexpress.com/item/" in link:
-        match = re.search(r'/item/(\d+).html', link)
-        if match:
-            pid = match.group(1)
-            return (
-                f"https://it.aliexpress.com/item/{pid}.html"
-                f"?aff_fcid={AFFILIATE_ID}&aff_fsk={AFFILIATE_ID}"
-                f"&aff_platform=default&sk={AFFILIATE_ID}"
-            )
-    elif "aliexpress.com" in link:
-        return f"https://s.click.aliexpress.com/e/{AFFILIATE_ID}"
-    return None
-
+# Handler
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text
-    links = re.findall(r'https?://\S+', text)
-    output = []
-
-    for link in links:
-        if "aliexpress.com" not in link:
-            continue
-
-        expanded = await expand_aliexpress_link(link)
-        converted = convert_link(expanded)
-        image, video, desc = await extract_info(expanded)
-
-        output.append((converted, image, video, desc))
-
-    if output:
-        try:
-            await update.message.delete()
-        except Exception as e:
-            logger.warning(f"Non posso cancellare il messaggio: {e}")
-
-        for link, image, video, desc in output:
-            caption = f"🤑 {desc}\n\n🔗 Link affiliato diretto:\n{link}"
-            if video:
-                await context.bot.send_video(chat_id=update.effective_chat.id, video=video, caption=caption)
-            elif image:
-                await context.bot.send_photo(chat_id=update.effective_chat.id, photo=image, caption=caption)
+    text = update.message.text or ""
+    matches = re.findall(r"https?://\S+", text)
+    for link in matches:
+        if any(domain in link for domain in ("aliexpress.com", "s.click.aliexpress.com", "a.aliexpress.com")):
+            final = await expand_link(link)
+            pid = extract_id(final)
+            if not pid:
+                continue
+            aff = make_affiliate(pid)
+            desc, img = await scrape_info(final)
+            # delete original
+            try:
+                await update.message.delete()
+            except:
+                pass
+            cap = f"🤑 {desc}\n\n🔗 {aff}"
+            if img:
+                await context.bot.send_photo(chat_id=update.effective_chat.id, photo=img, caption=cap)
             else:
-                await context.bot.send_message(chat_id=update.effective_chat.id, text=caption)
+                await context.bot.send_message(chat_id=update.effective_chat.id, text=cap)
+            return
 
-@web_app.post("/webhook")
-async def webhook_handler(req: Request):
+application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+
+# Webhook route
+@app.on_event("startup")
+async def startup():
+    await application.initialize()
+    await application.start()
+    url = f"https://{HOST}/webhook/{TOKEN}"
+    await bot.set_webhook(url)
+    logger.info(f"Webhook set to {url}")
+
+@app.post("/webhook/{token}")
+async def process_webhook(token: str, req: Request):
+    if token != TOKEN:
+        return {"error": "invalid token"}
     data = await req.json()
-    update = Update.de_json(data, telegram_app.bot)
-    await telegram_app.process_update(update)
+    update = Update.de_json(data, bot)
+    await application.process_update(update)
     return {"ok": True}
 
-async def main():
-    global telegram_app
-    telegram_app = ApplicationBuilder().token(TOKEN).build()
-    telegram_app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_message))
+@app.on_event("shutdown")
+async def shutdown():
+    await application.stop()
 
-    webhook_url = f"https://{RENDER_EXTERNAL_HOSTNAME}/webhook"
-    await telegram_app.bot.set_webhook(webhook_url)
-    await telegram_app.initialize()
-    await telegram_app.start()
-    logger.info("Bot avviato con webhook su Render!")
-
+# Run ASGI server
 if __name__ == "__main__":
-    asyncio.run(main())
+    uvicorn.run(app, host="0.0.0.0", port=PORT)
