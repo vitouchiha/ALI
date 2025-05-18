@@ -30,13 +30,12 @@ def scrape_ali_info(link: str) -> tuple[str, str]:
         res = httpx.get(link, headers=headers, timeout=10.0)
         soup = BeautifulSoup(res.text, "html.parser")
 
-        # Estrae il titolo della pagina
-        title_tag = soup.find("title")
-        title = title_tag.text.strip() if title_tag else "Nessuna descrizione trovata"
+        # Cerca Open Graph title e image
+        og_title = soup.find("meta", property="og:title")
+        og_image = soup.find("meta", property="og:image")
 
-        # Trova un'immagine (se presente)
-        img_tag = soup.find("img")
-        img_url = img_tag["src"] if img_tag and "src" in img_tag.attrs else None
+        title = og_title["content"].strip() if og_title and "content" in og_title.attrs else "Nessuna descrizione trovata"
+        img_url = og_image["content"] if og_image and "content" in og_image.attrs else None
 
         return title, img_url
     except Exception as e:
