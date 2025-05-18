@@ -3,10 +3,9 @@ services:
     name: telegram-aliexpress-bot
     env: python
     plan: free
-    buildCommand: "pip install -r requirements.txt"
-    startCommand: "gunicorn -k uvicorn.workers.UvicornWorker main:app --timeout 15"
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app:app --host 0.0.0.0 --port $PORT
     envVars:
       - key: TELEGRAM_BOT_TOKEN
       - key: OPENAI_API_KEY
       - key: RENDER_EXTERNAL_HOSTNAME
-
