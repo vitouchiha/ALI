@@ -8,4 +8,5 @@ services:
     envVars:
       - key: TELEGRAM_BOT_TOKEN
       - key: OPENAI_API_KEY
+      - key: AFFILIATE_ID
       - key: RENDER_EXTERNAL_HOSTNAME
