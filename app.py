@@ -8,7 +8,7 @@ from telegram.ext import ApplicationBuilder, MessageHandler, filters, ContextTyp
 
 # Configurazione
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-AFFILIATE_ID = "_EHN0NeQ"
+AFFILIATE_ID = "_EHN0NeQ"  # Codice affiliato di Vito
 
 # Logging
 logging.basicConfig(level=logging.INFO)
@@ -24,25 +24,17 @@ def generate_affiliate_link(pid: str) -> str:
         f"&aff_platform=default&sk={AFFILIATE_ID}"
     )
 
-def shorten_url(url: str) -> str:
-    try:
-        res = httpx.get(f"https://tinyurl.com/api-create.php?url={url}")
-        return res.text if res.status_code == 200 else url
-    except Exception as e:
-        logging.warning(f"Errore accorciamento URL: {e}")
-        return url
-
 def scrape_ali_info(link: str) -> tuple[str, str]:
     try:
         headers = {"User-Agent": "Mozilla/5.0"}
         res = httpx.get(link, headers=headers, timeout=10.0)
         soup = BeautifulSoup(res.text, "html.parser")
 
-        # Prende il titolo
+        # Estrae il titolo della pagina
         title_tag = soup.find("title")
         title = title_tag.text.strip() if title_tag else "Nessuna descrizione trovata"
 
-        # Cerca immagine (fallback a default se niente)
+        # Trova un'immagine (se presente)
         img_tag = soup.find("img")
         img_url = img_tag["src"] if img_tag and "src" in img_tag.attrs else None
 
@@ -60,10 +52,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pid = extract_product_id(link)
             if pid:
                 aff_link = generate_affiliate_link(pid)
-                short_link = shorten_url(aff_link)
                 title, image_url = scrape_ali_info(link)
 
-                caption = f"🤑 *{title}*\n\n🔗 [Link affiliato]({short_link})"
+                caption = f"🤑 *{title}*\n\n🔗 [Link affiliato diretto]({aff_link})"
+
                 try:
                     await update.message.delete()
                 except Exception as e:
@@ -77,7 +69,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def main():
     app = ApplicationBuilder().token(TOKEN).build()
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_message))
-    logging.info("Avvio polling...")
+    logging.info("Avvio polling... via Render")
     app.run_polling()
 
 if __name__ == "__main__":
