@@ -1,10 +1,12 @@
 services:
   - type: web
-    name: aliexpress-affiliate-bot
+    name: telegram-aliexpress-bot
     env: python
     plan: free
-    buildCommand: pip install -r requirements.txt
-    startCommand: python app.py
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "gunicorn -k uvicorn.workers.UvicornWorker main:app --timeout 15"
     envVars:
       - key: TELEGRAM_BOT_TOKEN
-        value: TUO_TOKEN_DEL_BOT
+      - key: OPENAI_API_KEY
+      - key: RENDER_EXTERNAL_HOSTNAME
+
