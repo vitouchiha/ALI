@@ -1,98 +1,122 @@
 import os
-import requests
-from flask import Flask, request
-from urllib.parse import urlparse, parse_qs
-import telegram
-from telegram import InputMediaPhoto
+import re
+import logging
+import httpx
+from bs4 import BeautifulSoup
+from telegram import Update, InputMediaPhoto, InputMediaVideo
+from telegram.ext import ApplicationBuilder, MessageHandler, ContextTypes, filters
+from fastapi import FastAPI, Request
+from telegram.ext import Application
+import asyncio
 
 # Config
-BOT_TOKEN = os.environ.get("BOT_TOKEN")
-AFFILIATE_ID = os.environ.get("AFFILIATE_ID")  # esempio: _EHN0NeQ
-BASE_AFFILIATE_URL = "https://s.click.aliexpress.com/deep_link.htm?aff_short_key={}&dp={}"
+TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+AFFILIATE_ID = "_EHN0NeQ"
+PORT = int(os.environ.get("PORT", 8080))
+RENDER_EXTERNAL_HOSTNAME = os.getenv("RENDER_EXTERNAL_HOSTNAME")
 
-bot = telegram.Bot(token=BOT_TOKEN)
-app = Flask(__name__)
+# Logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-def expand_url(short_url):
+# FastAPI app
+web_app = FastAPI()
+telegram_app: Application = None
+
+async def expand_aliexpress_link(short_url):
     try:
-        response = requests.head(short_url, allow_redirects=True, timeout=5)
-        return response.url
+        async with httpx.AsyncClient(follow_redirects=True) as client:
+            resp = await client.get(short_url)
+            return str(resp.url)
     except Exception as e:
-        print(f"[ERRORE] Impossibile espandere URL: {e}")
+        logger.warning(f"Errore nell'espansione del link: {e}")
         return short_url
 
-def extract_product_data(url):
+async def extract_info(url):
     try:
-        headers = {
-            "User-Agent": "Mozilla/5.0"
-        }
-        response = requests.get(url, headers=headers, timeout=10)
-        if not response.ok:
-            raise Exception("Errore nel caricamento della pagina prodotto")
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(url)
+        soup = BeautifulSoup(resp.text, 'html.parser')
 
-        html = response.text
+        # Estrai immagine
+        image_tag = soup.find('meta', property='og:image')
+        image_url = image_tag['content'] if image_tag else None
 
-        # Estrazione rozza del titolo
-        start_title = html.find("<title>")
-        end_title = html.find("</title>")
-        title = html[start_title + 7:end_title].strip() if start_title != -1 and end_title != -1 else "Titolo non trovato"
+        # Estrai video (se presente)
+        video_tag = soup.find('meta', property='og:video')
+        video_url = video_tag['content'] if video_tag else None
 
-        # Estrazione rozza dell'immagine
-        img_start = html.find('https://ae01.alicdn.com')
-        img_end = html.find('.jpg', img_start)
-        image_url = html[img_start:img_end + 4] if img_start != -1 and img_end != -1 else None
+        # Estrai descrizione
+        desc_tag = soup.find('meta', property='og:title')
+        description = desc_tag['content'] if desc_tag else "Nessuna descrizione trovata"
 
-        return title, image_url
+        return image_url, video_url, description
+
     except Exception as e:
-        print(f"[ERRORE] Estrazione prodotto fallita: {e}")
-        return "Errore nel recupero dati prodotto", None
+        logger.warning(f"Errore nel parsing: {e}")
+        return None, None, "Nessuna descrizione trovata"
 
-def generate_affiliate_link(original_url):
-    deep_link = requests.utils.quote(original_url, safe="")
-    return BASE_AFFILIATE_URL.format(AFFILIATE_ID, deep_link)
+def convert_link(link):
+    if "aliexpress.com/item/" in link:
+        match = re.search(r'/item/(\d+).html', link)
+        if match:
+            pid = match.group(1)
+            return (
+                f"https://it.aliexpress.com/item/{pid}.html"
+                f"?aff_fcid={AFFILIATE_ID}&aff_fsk={AFFILIATE_ID}"
+                f"&aff_platform=default&sk={AFFILIATE_ID}"
+            )
+    elif "aliexpress.com" in link:
+        return f"https://s.click.aliexpress.com/e/{AFFILIATE_ID}"
+    return None
 
-@app.route(f"/{BOT_TOKEN}", methods=["POST"])
-def webhook():
-    update = telegram.Update.de_json(request.get_json(force=True), bot)
-    if update.message and update.message.text:
-        msg = update.message
-        chat_id = msg.chat_id
-        message_id = msg.message_id
-        text = msg.text.strip()
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text
+    links = re.findall(r'https?://\S+', text)
+    output = []
 
-        # Cerca link AliExpress
-        if "aliexpress.com" in text or "s.click.aliexpress" in text or "a.aliexpress" in text:
-            # Espandi se necessario
-            expanded_url = expand_url(text)
+    for link in links:
+        if "aliexpress.com" not in link:
+            continue
 
-            # Estrai dati prodotto
-            title, image_url = extract_product_data(expanded_url)
+        expanded = await expand_aliexpress_link(link)
+        converted = convert_link(expanded)
+        image, video, desc = await extract_info(expanded)
 
-            # Genera link affiliato
-            aff_link = generate_affiliate_link(expanded_url)
+        output.append((converted, image, video, desc))
 
-            # Costruisci didascalia
-            caption = f"{title}\n\n🔗 [Compra con il mio link affiliato]({aff_link})"
+    if output:
+        try:
+            await update.message.delete()
+        except Exception as e:
+            logger.warning(f"Non posso cancellare il messaggio: {e}")
 
-            # Elimina messaggio originale
-            try:
-                bot.delete_message(chat_id=chat_id, message_id=message_id)
-            except Exception as e:
-                print(f"[ERRORE] Non riesco a cancellare il messaggio: {e}")
+        for link, image, video, desc in output:
+            caption = f"🤑 {desc}\n\n🔗 Link affiliato diretto:\n{link}"
+            if video:
+                await context.bot.send_video(chat_id=update.effective_chat.id, video=video, caption=caption)
+            elif image:
+                await context.bot.send_photo(chat_id=update.effective_chat.id, photo=image, caption=caption)
+            else:
+                await context.bot.send_message(chat_id=update.effective_chat.id, text=caption)
 
-            # Invia messaggio modificato
-            try:
-                if image_url:
-                    bot.send_photo(chat_id=chat_id, photo=image_url, caption=caption, parse_mode="Markdown")
-                else:
-                    bot.send_message(chat_id=chat_id, text=caption, parse_mode="Markdown")
-            except Exception as e:
-                print(f"[ERRORE] Invio messaggio fallito: {e}")
-    return "OK"
+@web_app.post("/webhook")
+async def webhook_handler(req: Request):
+    data = await req.json()
+    update = Update.de_json(data, telegram_app.bot)
+    await telegram_app.process_update(update)
+    return {"ok": True}
 
-@app.route("/", methods=["GET"])
-def home():
-    return "Bot AliExpress affiliato attivo e funzionante. Vai tranquillo Vito, tutto sotto controllo."
+async def main():
+    global telegram_app
+    telegram_app = ApplicationBuilder().token(TOKEN).build()
+    telegram_app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_message))
+
+    webhook_url = f"https://{RENDER_EXTERNAL_HOSTNAME}/webhook"
+    await telegram_app.bot.set_webhook(webhook_url)
+    await telegram_app.initialize()
+    await telegram_app.start()
+    logger.info("Bot avviato con webhook su Render!")
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000)
+    asyncio.run(main())
