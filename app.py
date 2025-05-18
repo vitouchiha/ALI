@@ -76,7 +76,8 @@ async def scrape_info(link: str) -> tuple[str, str | None]:
 async def generate_description(link: str) -> str:
     try:
         prompt = f"Genera una breve descrizione entusiasmante per questo prodotto AliExpress: {link}"
-        resp = await openai.ChatCompletion.acreate(
+        # Using synchronous call due to OpenAI v1.x interface
+        resp = openai.ChatCompletion.create(
             model="gpt-3.5-turbo",
             messages=[{"role": "user", "content": prompt}],
             max_tokens=80,
