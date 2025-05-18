@@ -1,7 +1,8 @@
+Flask
+requests
 python-telegram-bot==22.1
 fastapi
 uvicorn
 httpx
 openai
 beautifulsoup4
-requests
