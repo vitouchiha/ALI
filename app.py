@@ -16,8 +16,8 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 AFFILIATE_ID = "_EHN0NeQ"
 HOST = os.getenv("RENDER_EXTERNAL_HOSTNAME")  # dominio onrender.com
 
-if not TOKEN or not OPENAI_API_KEY:
-    logger.error("Le variabili TELEGRAM_BOT_TOKEN e OPENAI_API_KEY devono essere impostate.")
+if not TOKEN or not OPENAI_API_KEY or not HOST:
+    logger.error("Le variabili TELEGRAM_BOT_TOKEN, OPENAI_API_KEY e RENDER_EXTERNAL_HOSTNAME devono essere impostate.")
     raise RuntimeError("Chiavi mancanti nelle variabili d'ambiente")
 
 # Inizializzazione Bot e Dispatcher (Aiogram)
@@ -27,7 +27,6 @@ openai.api_key = OPENAI_API_KEY
 
 # Inizializzazione FastAPI
 app = FastAPI()
-
 
 @app.on_event("startup")
 async def on_startup():
@@ -40,7 +39,6 @@ async def on_startup():
         logger.info(f"Webhook impostato su {webhook_url}")
     except Exception as e:
         logger.error(f"Errore impostando il webhook: {e}")
-
 
 @app.post("/bot/{token}")
 async def telegram_webhook(token: str, req: Request):
@@ -55,7 +53,6 @@ async def telegram_webhook(token: str, req: Request):
         logger.error(f"Errore nel process_update: {e}")
     return {"ok": True}
 
-
 @dp.message_handler()
 async def handle_message(message: types.Message):
     """Gestisce ogni messaggio in arrivo."""
@@ -68,7 +65,7 @@ async def handle_message(message: types.Message):
             ali_link = link
             break
     if not ali_link:
-        return  # nessun link AliExpress trovato
+        return  # cazzo, nessun link AliExpress trovato
 
     # Espande shortlink seguendo i redirect
     try:
@@ -103,14 +100,10 @@ async def handle_message(message: types.Message):
 
     # Chiamata a ChatGPT per generare la descrizione (in italiano)
     try:
-        prompt = (
-            f"Genera una descrizione pubblicitaria per il prodotto AliExpress con ID {product_id}."
-        )
+        prompt = f"Genera una descrizione pubblicitaria per il prodotto AliExpress con ID {product_id}."
         response = openai.ChatCompletion.create(
             model="gpt-3.5-turbo",
-            messages=[
-                {"role": "user", "content": prompt}
-            ],
+            messages=[{"role": "user", "content": prompt}],
             max_tokens=150,
             temperature=0.7
         )
