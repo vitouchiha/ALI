@@ -1,7 +1,6 @@
 import os
 import re
 import logging
-import asyncio
 import httpx
 from bs4 import BeautifulSoup
 from fastapi import FastAPI, Request
@@ -9,6 +8,7 @@ from telegram import Update, Bot
 from telegram.ext import ApplicationBuilder, MessageHandler, ContextTypes, filters
 import uvicorn
 import openai
+from urllib.parse import urlparse, parse_qs, unquote
 
 # Config
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
@@ -27,7 +27,7 @@ if not TOKEN or not OPENAI_API_KEY or not HOST:
     raise RuntimeError("Env vars mancanti")
 
 # Setup OpenAI
-ope = openai.api_key = OPENAI_API_KEY
+openai.api_key = OPENAI_API_KEY
 
 # Initialize Telegram Application
 application = ApplicationBuilder().token(TOKEN).build()
@@ -37,9 +37,10 @@ bot = application.bot
 app = FastAPI()
 
 # Utilities
+
 def extract_id(url: str) -> str | None:
-    match = re.search(r"/item/(\d+)\.html", url)
-    return match.group(1) if match else None
+    m = re.search(r"/item/(\d+)\.html", url)
+    return m.group(1) if m else None
 
 async def expand_link(link: str) -> str:
     headers = {"User-Agent": "Mozilla/5.0 (compatible; Bot/1.0)"}
@@ -47,8 +48,7 @@ async def expand_link(link: str) -> str:
         async with httpx.AsyncClient(follow_redirects=True, headers=headers, timeout=10) as client:
             resp = await client.get(link)
             final_url = str(resp.url)
-        # Handle AliExpress share redirectUrl
-        from urllib.parse import urlparse, parse_qs, unquote
+        # Handle AliExpress share redirectUrl param
         parsed = urlparse(final_url)
         qs = parse_qs(parsed.query)
         if 'redirectUrl' in qs:
@@ -76,7 +76,6 @@ async def scrape_info(link: str) -> tuple[str, str | None]:
 async def generate_description(link: str) -> str:
     try:
         prompt = f"Genera una breve descrizione entusiasmante per questo prodotto AliExpress: {link}"
-        # Using synchronous call due to OpenAI v1.x interface
         resp = openai.ChatCompletion.create(
             model="gpt-3.5-turbo",
             messages=[{"role": "user", "content": prompt}],
@@ -98,31 +97,44 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             product_id = extract_id(final)
             if not product_id:
                 continue
-            affiliate_link = (
-                f"https://it.aliexpress.com/item/{product_id}.html"
-                f"?aff_fcid={AFFILIATE_ID}&aff_fsk={AFFILIATE_ID}"
-                f"&aff_platform=default&sk={AFFILIATE_ID}"
-            )
+
+            # Parse invitationCode if present
+            parsed = urlparse(final)
+            qs = parse_qs(parsed.query)
+            invitation = qs.get('invitationCode', [None])[0]
+
+            # Build affiliate link: support Share & Earn or default
+            if invitation:
+                affiliate_link = f"https://it.aliexpress.com/item/{product_id}.html?invitationCode={invitation}&businessType=affiliate"
+            else:
+                affiliate_link = (
+                    f"https://it.aliexpress.com/item/{product_id}.html"
+                    f"?aff_fcid={AFFILIATE_ID}&aff_fsk={AFFILIATE_ID}"
+                    f"&aff_platform=default&sk={AFFILIATE_ID}"
+                )
+
+            # Fetch metadata
             title, img_url = await scrape_info(final)
             description = await generate_description(final)
 
-            # Cancella il messaggio originale
+            # Delete original message
             try:
                 await update.message.delete()
             except:
                 pass
 
-            # Nome utente
+            # Username
             user_name = update.effective_user.first_name
 
-            # Componi caption
+            # Compose caption
             caption = (
                 f"Grazie per aver condiviso questo fantastico prodotto, {user_name}!\n\n"
                 f"{description}\n\n"
-                f"Utilizza il link sottostante per far guadagnare una commissione a Nellino:\n{affiliate_link}"
+                f"Utilizza il link sottostante per far guadagnare una commissione a Nellino:\n"
+                f"{affiliate_link}"
             )
 
-            # Invia foto o testo
+            # Send response
             if img_url:
                 await context.bot.send_photo(
                     chat_id=update.effective_chat.id,
